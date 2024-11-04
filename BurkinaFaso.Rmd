@@ -1,0 +1,1020 @@
+---
+title: "Burkina Faso (Data Cleaning, Modeling, and Visualization)"
+author: "Ziwei Zhao"
+date: "May 7, 2024"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r echo=FALSE, warning=FALSE}
+library(tidyverse)
+library(survival)
+library(ggplot2)
+library(haven)
+library(data.table)
+```
+
+```{r}
+# Baseline data obtained using codes in STATA ClearGSK3_csv_BL.do file
+data.BL <- read_dta("./GSK3_BL.dta") # Specific documentation is in "Description of GSK3 data.docx"
+
+# Simplify, rename, and take information necessary for this research
+data.BL2 <- data.BL%>%
+  mutate(d1 = DATE_DOSE1, # date of dose1
+         d2 = DATE_DOSE2, 
+         d3 = DATE_DOSE3,
+         d4 = DATE_DOSE4,
+         start_dof = STRTITT, # start date of follow-up period for cohort ITT
+         end_dof = ENDITTSE, # end date of follow-up period for cohort ITT
+         end_ef = ENDITTEE, # end date of extended follow-up period for cohort ITT
+         gender = SEX)%>%
+  dplyr::select(PID, GROUP_NB, gender, AGEC, CENTER, d1:end_ef)
+
+
+#Filter per-protocol polulation
+#R3R -- 1
+#R3C -- 2
+#C3C -- 3
+
+```
+
+Center:  
+2   Kenya
+3   Lambarene, Gabon
+7   Manghica, Mozambique
+8   Ghana
+9   Lilongwe, Malawi
+10  Tanzania
+*11  Nanoro, Burkina Faso*
+13  Kenya
+15  Kenya
+16  Tanzania
+19  Ghana
+
+# ITT POPULATION
+```{r}
+children.c <- data.BL2%>%
+  mutate(DOE = start_dof)%>%
+  filter(AGEC == 1 & GROUP_NB == 3 & is.na(d1)== F & DOE < end_dof)%>% #2963
+    #After this step: DOE < end_dof, 2974 -> 2963
+   mutate(d1_m = as.double(difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d2_m = as.double(difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d3_m = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d4_m =  as.double(difftime(as.Date(d4), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d1d2 = d2_m - d1_m,
+         d2d3 = d3_m - d2_m,
+         d3d4 = d4_m - d3_m,
+         d3_td = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days")))
+
+children.i <- data.BL2%>%
+  mutate(DOE = start_dof)%>%
+  filter(AGEC == 1 & GROUP_NB != 3 & is.na(d1)== F & DOE < end_dof)%>% 
+  #After this step: DOE < end_dof, 5948 -> 5909
+   mutate(d1_m = as.double(difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d2_m = as.double(difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d3_m = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d4_m =  as.double(difftime(as.Date(d4), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d1d2 = d2_m - d1_m,
+         d2d3 = d3_m - d2_m,
+         d3d4 = d4_m - d3_m,
+         d3_td = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days")))
+
+data.BL.ITT <- rbind(children.c, children.i)%>%
+  arrange(PID)
+```
+
+
+
+
+
+Look at event times at Burkina Faso (control arm) 
+403 subjects in total
+```{r}
+pid <- read.csv("./gsk_110021_pid_v02.csv", sep = ",")%>%
+  filter(CENTER == 11)
+bk  <- right_join(x = data.BL2, y = read.csv("./gsk_110021_efficacy_v02.csv", sep = ","), by = "PID")%>%
+  filter(TEMP >= 37.5 & FINALDEN > 5000 & (PID %in% pid$PID))%>%
+  mutate(date = as.Date(strptime(DATE, format = "%d%b%Y")),
+         # Date of entry = dose3 + 14days
+         DOE = as.Date(d3) +14)%>%
+  # Remove events before date of entry
+  #filter(DOE<=date)%>%
+  dplyr::select(PID, DOE, date, everything())%>%
+  filter(PID %in% pid$PID)%>%
+  arrange(PID, date)%>% #9160
+  # Remove events within 14 days of the subject's previous event
+  group_by(PID)%>%
+  mutate(group = accumulate(date, 
+                            ~ if (as.numeric(difftime(as.Date(.y), as.Date(.x), units = "days"))<= 14) .x else .y))%>%
+  ungroup()%>%
+  group_by(PID, group)%>%
+  slice_head(n = 1)%>%
+  ungroup()%>%
+  dplyr::select(PID, GROUP_NB, DOE, date) #9091
+
+bk.c <- filter(bk, GROUP_NB == 3)
+
+n_distinct(bk.c$PID)
+
+ggplot() + geom_histogram(aes(date), data = bk.c, bins = 100) +
+  scale_x_date(date_breaks = "2 month") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+Look at event times at Burkina Faso (intervention arm) 
+785 subjects in total
+```{r}
+bk.i <- filter(bk, GROUP_NB != 3)
+
+ggplot() + geom_histogram(aes(date), data = bk.i, bins = 100) +
+  scale_x_date(date_breaks = "2 month") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+PER PROTOCOL POPULATION
+
+```{r}
+# Include only subjects received first 3 doses, remove Manghica due to seasonal variation
+children.c <- filter(data.BL2, AGEC == 1 & GROUP_NB ==3)%>% #2974
+   filter(is.na(d3)== F & is.na(d2)== F & is.na(d1)== F)%>%
+   filter(CENTER!=7)%>% #2546
+   mutate(d1_m = as.double(difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"))*12/365,
+         d2_m = as.double(difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))*12/365,
+         d3_m =  as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))*12/365,
+         d4_m =  as.double(difftime(as.Date(d4), as.Date("1960-01-01"), units = "days"))*12/365,
+         d1d2 = d2_m - d1_m,
+         d2d3 = d3_m - d2_m,
+         d3d4 = d4_m - d3_m,
+         d3_td = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days")))%>%
+  # remove out of interval doses
+  filter(d1d2 > 0.6 & d1d2 < 1.4 & d2d3 > 0.6 & d2d3 < 1.4 & end_dof > d3_td + 14) #2344
+
+children.i <- filter(data.BL2, AGEC == 1 & GROUP_NB !=3)%>% #5948
+   filter(is.na(d3)== F & is.na(d2)== F & is.na(d1)== F)%>%
+   filter(CENTER!=7)%>% #5027
+   mutate(d1_m = as.double(difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"))*12/365,
+         d2_m = as.double(difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))*12/365,
+         d3_m =  as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))*12/365,
+         d4_m =  as.double(difftime(as.Date(d4), as.Date("1960-01-01"), units = "days"))*12/365,
+         d1d2 = d2_m - d1_m,
+         d2d3 = d3_m - d2_m,
+         d3d4 = d4_m - d3_m,
+         d3_td = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days")))%>%
+  # remove out of interval doses
+  filter(d1d2 > 0.6 & d1d2 < 1.4 & d2d3 > 0.6 & d2d3 < 1.4 & end_dof > d3_td + 14) #4593
+
+data.BL.PP <- rbind(children.c, children.i)%>%
+  arrange(PID)
+```
+
+
+
+
+Look at malaria events
+```{r}
+event.clinical <- read.csv("./gsk_110021_efficacy_v02.csv", sep = ",")%>%
+  filter(TEMP >= 37.5 & FINALDEN > 5000)%>%
+  mutate(date = strptime(DATE, format = "%d%b%Y"))%>%
+  dplyr::select(PID, date, everything())
+
+event.severe <- read.csv("./gsk_110021_sevmal_v02.csv", sep = ",")%>%
+  mutate(date = strptime(DATE, format = "%d%b%Y"))%>%
+  dplyr::select(PID, date, everything())
+  
+```
+
+Data cleaning
+```{r}
+# Write a function to truncate the data to certain length of follow-up time
+function.finaldata <- function (month) {
+  data.join <- left_join(x = data.BL.PP, y = event.clinical, by = "PID")%>%
+   arrange(PID, date)%>%
+   mutate(event = case_when(is.na(date)==T ~ 0,
+                           TRUE ~ 1),
+           d3_td = case_when(is.na(d3) == F ~ difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"),
+                       TRUE ~ max(
+                         difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"),
+                         difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))),
+          DOE = d3_td +14,
+          event_td = difftime(as.Date(date), as.Date("1960-01-01"), units = "days"))%>%
+   group_by(PID)%>% 
+   distinct(event_td, .keep_all = T)%>% # emove duplicated event date for each subject
+   ungroup()%>%
+   mutate(
+    # *time* is either event time or follow-up time if there's no events
+         time = case_when(event != 0 ~ (event_td - (d3_td +14))*12/365.25,
+                          TRUE ~ (end_dof - (d3_td+14))*12/365.25 ))
+
+#get pid for subjects who only have one event
+  pid.one <- data.join%>%
+    group_by(PID)%>%filter(n()==1)
+data.join <- data.join%>%
+  # deal with subjects experience only 1 event before DOE
+  filter(time > 0 | PID %in% pid.one$PID)%>%
+   mutate(event = case_when(time <= 0 ~ 0, TRUE ~ event),
+          time = case_when(event != 0 ~ (event_td - (d3_td +14))*12/365.25,
+                          TRUE ~ (end_dof - (d3_td+14))*12/365.25 ))%>%
+   dplyr::select(PID, AGEC, GROUP_NB, CENTER, DOE, time, event, end_dof, d3d4)%>%
+   
+  mutate(
+    #Truncate time for subjects without events
+     time = case_when( #14*12/365.25 : 14 days in unit of month
+     (event == 0 & is.na(d3d4) == T & time >= month - 14*12/365.25) ~ (month - 14*12/365.25)-0.000000000001,
+     (event == 0 & is.na(d3d4) == T & time < month - 14*12/365.25) ~ as.double(time)-0.000000000001,
+     (event == 0 & time >= (d3d4-14*12/365.25) & d3d4 <= (18 + 14*12/365.25)) ~ (d3d4-14*12/365.25)-0.000000000001,
+     (event == 0 & time >= (d3d4-14*12/365.25) & d3d4 > (18 + 14*12/365.25)) ~ (month - 14*12/365.25)-0.000000000001,
+     (event == 0 & time < (d3d4-14*12/365.25)  & d3d4 <= (18 + 14*12/365.25)) ~ as.double(time)-0.000000000001,
+     (event == 0 & time < (d3d4-14*12/365.25)  & d3d4 > (18 + 14*12/365.25)) ~ min(month - 14*12/365.25, time)-0.000000000001,
+     TRUE ~ as.double(time)),
+     #set censoring time
+      end_dof = (as.double(end_dof) - as.double(DOE))*12/365.25,
+      follow_up = case_when(
+            (is.na(d3d4) == T & end_dof >= month - 14*12/365.25) ~ month - 14*12/365.25,
+            (is.na(d3d4) == T & end_dof < month - 14*12/365.25) ~ end_dof,
+            (end_dof >= (d3d4-14*12/365.25) & d3d4 <= (month + 14*12/365.25)) ~ d3d4-14*12/365.25,
+            (end_dof >= (d3d4-14*12/365.25) & d3d4 > (month + 14*12/365.25)) ~ month - 14*12/365.25,
+            (end_dof < (d3d4-14*12/365.25) & d3d4 <= (month + 14*12/365.25)) ~ end_dof,
+            (end_dof < (d3d4-14*12/365.25) & d3d4 > (month + 14*12/365.25)) ~ min(month - 14*12/365.25, end_dof)),
+          GROUP_NB = case_when(GROUP_NB == 3 ~ 0,
+                               TRUE ~ 1))%>%
+   group_by(PID)%>%
+   # Assign start time and end time for multiple events
+   mutate(start = lag(time))%>%
+   ungroup()%>%
+   mutate(start = case_when(is.na(start) == T ~ 0,
+                           TRUE ~ start),
+          end = case_when(start == 0 & time >= follow_up ~ follow_up -0.000000000001,
+                          TRUE ~ time),
+          event = case_when(start == 0 & time > follow_up ~ 0,
+                            TRUE ~ event))%>%
+  filter(end <= follow_up)
+
+# Add a row for non-censored subjects at 20th month (subjects with events)
+event_follow <- filter(data.join, event ==1 & abs(end_dof-time) <= 0.00001)
+events <- filter(data.join, event ==1 & end_dof > follow_up & PID %in% event_follow$PID == F)%>%
+  group_by(PID)%>%
+  summarise(AGEC = last(AGEC),
+            GROUP_NB = last(GROUP_NB),
+            CENTER = last(CENTER),
+            DOE = last(DOE),
+            event = max(event),
+            follow_up = max(follow_up),
+            end_dof = max(end_dof))%>%
+  mutate(time = follow_up,
+         event = 0)
+# Add a row for subjects censored before 20th month (subjects with events)
+events.c <- filter(data.join, event ==1 & end_dof <= follow_up & PID %in% event_follow$PID == F)%>%
+  group_by(PID)%>%
+  summarise(AGEC = last(AGEC),
+            GROUP_NB = last(GROUP_NB),
+            CENTER = last(CENTER),
+            DOE = last(DOE),
+            event = max(event),
+            follow_up = max(follow_up),
+            end_dof = max(end_dof),
+            time = last(follow_up))%>%
+  mutate(event = 0)
+
+analysis.1 <- data.join%>%
+   dplyr::select(PID, AGEC, GROUP_NB, CENTER, DOE, event, follow_up, end_dof, time)%>%
+   rbind(events, events.c)%>%
+   arrange(PID, time)
+
+# Remove events within 14 days of the subject's previous event
+data.censor <- filter(analysis.1, event == 0)
+data.events <- filter(analysis.1, event == 1)%>%
+  group_by(PID)%>%
+  mutate(group = accumulate(time, ~ if (.y - .x <= 14*12/365.25+ 0.000000000001) .x else .y))%>%
+  ungroup()%>%
+  group_by(PID, group)%>%
+  slice_head(n = 1)%>%
+  ungroup()%>%
+  dplyr::select(-group)
+
+analysis_final <- rbind(data.censor, data.events)%>%
+  arrange(PID, time)%>%
+   group_by(PID)%>%
+   # Assign start time and end time for multiple events
+   mutate(start = lag(time) + 14*12/365.25)%>%
+   ungroup()%>%
+   mutate(start = case_when(is.na(start) == T ~ 0,
+                           TRUE ~ start),
+          end = case_when(start == 0 & time >= follow_up ~ follow_up,
+                          TRUE ~ time))%>%
+  filter(end - start >0)
+  
+return(analysis_final)
+}
+
+analysis <- function.finaldata(18)
+```
+
+```{r}
+seasonal <- filter(analysis, CENTER == 11)%>%
+  mutate(DOE = as.Date(as.numeric(DOE), origin = "1960-01-01"))
+
+control.inc <- filter(seasonal, event == 1 )%>%
+  mutate(time = as.Date(as.numeric(time*365/12), origin = DOE))%>%
+  arrange(time)
+
+ggplot() + geom_histogram(aes(time), data = control.inc, bins = 50) + scale_x_date(date_breaks = "2 month") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+distinct <- distinct(seasonal, PID, .keep_all = T)
+distinct.i <- distinct(seasonal, PID, .keep_all = T)%>%
+  filter(GROUP_NB == 1)
+distinct.c <- distinct(seasonal, PID, .keep_all = T)%>%
+  filter(GROUP_NB == 0)
+summary(distinct$DOE)
+ggplot() + geom_histogram(aes(DOE), data = distinct, bins = 50) + scale_x_date(date_breaks = "1 month") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggplot() + geom_histogram(aes(DOE), data = distinct.i, bins = 50) + scale_x_date(date_breaks = "1 month") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggplot() + geom_histogram(aes(DOE), data = distinct.c, bins = 50) + scale_x_date(date_breaks = "1 month") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Check censoring
+```{r}
+# population information of 17.5 month data
+nrow(seasonal%>%distinct(PID))
+nrow(seasonal%>%filter(GROUP_NB == 1)%>%distinct(PID))
+nrow(seasonal%>%filter(GROUP_NB == 0)%>%distinct(PID))
+```
+```{r}
+data.all <- seasonal%>%distinct(PID, .keep_all = T)
+nrow(filter(data.all, end_dof > 0 & end_dof <= 11.5))
+nrow(filter(data.all, end_dof > 0 & end_dof <= 11.5))/nrow(data.all)*100
+nrow(filter(data.all, end_dof > 11.5 & end_dof <= 14.5))
+nrow(filter(data.all, end_dof > 11.5 & end_dof <= 14.5))/nrow(data.all)*100
+nrow(filter(data.all, end_dof > 14.5 & end_dof <= 17.5))
+nrow(filter(data.all, end_dof > 14.5 & end_dof <= 17.5))/nrow(data.all)*100
+nrow(filter(data.all, end_dof > 17.5))
+nrow(filter(data.all, end_dof > 17.5))/nrow(data.all)*100
+nrow(data.all)
+```
+
+```{r}
+data.all.i <- seasonal%>%distinct(PID, .keep_all = T)%>%filter(GROUP_NB == 1)
+nrow(filter(data.all.i, end_dof > 0 & end_dof <= 11.5))
+nrow(filter(data.all.i, end_dof > 0 & end_dof <= 11.5))/nrow(data.all.i)*100
+nrow(filter(data.all.i, end_dof > 11.5 & end_dof <= 14.5))
+nrow(filter(data.all.i, end_dof > 11.5 & end_dof <= 14.5))/nrow(data.all.i)*100
+nrow(filter(data.all.i, end_dof > 14.5 & end_dof <= 17.5))
+nrow(filter(data.all.i, end_dof > 14.5 & end_dof <= 17.5))/nrow(data.all.i)*100
+nrow(filter(data.all.i, end_dof > 17.5))
+nrow(filter(data.all.i, end_dof > 17.5))/nrow(data.all.i)*100
+nrow(data.all.i)
+```
+
+```{r}
+data.all.c <- seasonal%>%distinct(PID, .keep_all = T)%>%filter(GROUP_NB == 0)
+nrow(filter(data.all.c, end_dof > 0 & end_dof <= 11.5))
+nrow(filter(data.all.c, end_dof > 0 & end_dof <= 11.5))/nrow(data.all.c)*100
+nrow(filter(data.all.c, end_dof > 11.5 & end_dof <= 14.5))
+nrow(filter(data.all.c, end_dof > 11.5 & end_dof <= 14.5))/nrow(data.all.c)*100
+nrow(filter(data.all.c, end_dof > 14.5 & end_dof <= 17.5))
+nrow(filter(data.all.c, end_dof > 14.5 & end_dof <= 17.5))/nrow(data.all.c)*100
+nrow(filter(data.all.c, end_dof > 17.5))
+nrow(filter(data.all.c, end_dof > 17.5))/nrow(data.all.c)*100
+nrow(data.all.c)
+```
+
+
+
+1. PH
+```{r}
+Y = Surv(seasonal$start, seasonal$end, seasonal$event == 1)
+fit.ph <- coxph(Y ~ GROUP_NB + cluster(PID), data = seasonal, control = coxph.control(timefix = F), robust = T)
+fit.ph
+
+1-exp(fit.ph[[1]][[1]])
+1-exp(1.96*0.06469+fit.ph[[1]][[1]])
+1-exp(-1.96*0.06469+fit.ph[[1]][[1]])
+```
+
+
+2. time-varing intervention effect and AUC
+```{r}
+Y = Surv(seasonal$start, seasonal$end, seasonal$event == 1)
+fit.extend.seasonal<- coxph(Y ~ GROUP_NB +  tt(GROUP_NB) + cluster(PID), data = seasonal,
+                   tt = function(x, t, ...)x*log(t), control = coxph.control(timefix = F))
+```
+```{r}
+fit.extend.seasonal
+BIC(fit.extend.seasonal)
+beta0 <- fit.extend.seasonal[[1]][[1]]
+beta0
+beta1 <- fit.extend.seasonal[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*log(t))
+
+integrate(auc.fun, 0, 17.54)
+7.658199/17.54
+
+integrate(auc.fun, 0, 14.54)
+7.117198/14.54
+
+integrate(auc.fun, 0, 11.54)
+6.322297/11.54
+```
+
+
+
+
+
+# Number of cases averted per 1000 subjects
+
+4 intervals, each 3 months
+```{r}
+# function: ristime (start, end, start.t, ent.t)
+# used to add a column to the dataframe calculating the time at risk during certain interval from *star.t* to *end.t*
+
+risktime <- function(start, end, start.t, end.t) {
+  case_when(
+    end <= start.t ~ 0,
+    start <= start.t & end <= end.t ~ end - start.t,
+    start <= start.t & end > end.t ~ end.t - start.t,
+    start > start.t & end <= end.t ~ end - start,
+    start > start.t & start < end.t & end > end.t ~ end.t - start,
+    TRUE ~ 0
+  )
+}
+
+
+seasonal.cases <- mutate(seasonal, 
+                   risktime1 = risktime(start, end, 0, 3),
+                   risktime2 = risktime(start, end, 3, 6),
+                   risktime3 = risktime(start, end, 6, 9),
+                   risktime4 = risktime(start, end, 9, 12),
+                   risktime5 = risktime(start, end, 12, 15),
+                   risktime6 = risktime(start, end, 15, 18)
+                   )
+```
+
+```{r}
+seasonal.c <- filter(seasonal.cases, GROUP_NB == 0) #773
+events.control <- filter(seasonal.cases, event == 1, GROUP_NB == 0) #595
+events1.c <- nrow(filter(events.control, end > 0 & end <= 3))
+events2.c <- nrow(filter(events.control, end > 3 & end <= 6))
+events3.c <- nrow(filter(events.control, end > 6 & end <= 9))
+events4.c <- nrow(filter(events.control, end > 9 & end <= 12))
+cases.control1 <- events1.c/sum(seasonal.c$risktime1)*3000
+cases.control2 <- events2.c/sum(seasonal.c$risktime2)*3000
+cases.control3 <- events3.c/sum(seasonal.c$risktime3)*3000
+cases.control4 <- events4.c/sum(seasonal.c$risktime4)*3000
+cases.control = sum(
+  cases.control1,
+  cases.control2,
+  cases.control3,
+  cases.control4
+)
+
+cases.control
+```
+
+
+```{r}
+seasonal.i <- filter(seasonal.cases, GROUP_NB == 1) #1042
+events.intervention <- filter(seasonal.cases, event == 1, GROUP_NB == 1) #709
+events1.i <- nrow(filter(events.intervention, end > 0 & end <= 3))
+events2.i <- nrow(filter(events.intervention, end > 3 & end <= 6))
+events3.i <- nrow(filter(events.intervention, end > 6 & end <= 9))
+events4.i <- nrow(filter(events.intervention, end > 9 & end <= 12))
+cases.intervention1 <- events1.i/sum(seasonal.i$risktime1)*3000
+cases.intervention2 <- events2.i/sum(seasonal.i$risktime2)*3000
+cases.intervention3 <- events3.i/sum(seasonal.i$risktime3)*3000
+cases.intervention4 <- events4.i/sum(seasonal.i$risktime4)*3000
+cases.intervention = sum(
+  cases.intervention1,
+  cases.intervention2,
+  cases.intervention3,
+  cases.intervention4
+)
+
+cases.intervention
+
+cases.control - cases.intervention
+```
+
+
+12 intervals, each 1 month
+```{r}
+# Add columns of 1-month risk time after the dataframe
+interval = seq(0, 12, by = 1)
+temp_list <- list()
+for(j in c(1:(length(interval)-1))) {
+inc.check <- seasonal
+ temp_list[[j]] = risktime(seasonal$start, seasonal$end, interval[j], interval[j+1])
+}
+inc.check <- data.frame(temp_list)
+names(inc.check) = paste0("risktime", 1:(length(interval)-1))
+seasonal12 <- cbind(seasonal, inc.check)
+
+seasonal.c <- filter(seasonal12, GROUP_NB == 0) 
+events.control <- filter(seasonal12, event == 1, GROUP_NB == 0)
+events1.c <- nrow(filter(events.control, end > 0 & end <= 1))
+events2.c <- nrow(filter(events.control, end > 1 & end <= 2))
+events3.c <- nrow(filter(events.control, end > 2 & end <= 3))
+events4.c <- nrow(filter(events.control, end > 3 & end <= 4))
+events5.c <- nrow(filter(events.control, end > 4 & end <= 5))
+events6.c <- nrow(filter(events.control, end > 5 & end <= 6))
+events7.c <- nrow(filter(events.control, end > 6 & end <= 7))
+events8.c <- nrow(filter(events.control, end > 7 & end <= 8))
+events9.c <- nrow(filter(events.control, end > 8 & end <= 9))
+events10.c <- nrow(filter(events.control, end > 9 & end <= 10))
+events11.c <- nrow(filter(events.control, end > 10 & end <= 11))
+events12.c <- nrow(filter(events.control, end > 11 & end <= 12))
+cases.control1 <- events1.c/sum(seasonal.c$risktime1)*1000
+cases.control2 <- events2.c/sum(seasonal.c$risktime2)*1000
+cases.control3 <- events3.c/sum(seasonal.c$risktime3)*1000
+cases.control4 <- events4.c/sum(seasonal.c$risktime4)*1000
+cases.control5 <- events5.c/sum(seasonal.c$risktime5)*1000
+cases.control6 <- events6.c/sum(seasonal.c$risktime6)*1000
+cases.control7 <- events7.c/sum(seasonal.c$risktime7)*1000
+cases.control8 <- events8.c/sum(seasonal.c$risktime8)*1000
+cases.control9 <- events9.c/sum(seasonal.c$risktime9)*1000
+cases.control10 <- events10.c/sum(seasonal.c$risktime10)*1000
+cases.control11 <- events11.c/sum(seasonal.c$risktime11)*1000
+cases.control12 <- events12.c/sum(seasonal.c$risktime12)*1000
+cases.control = sum(
+  cases.control1,
+  cases.control2,
+  cases.control3,
+  cases.control4,
+  cases.control5,
+  cases.control6,
+  cases.control7,
+  cases.control8,
+  cases.control9,
+  cases.control10,
+  cases.control11,
+  cases.control12
+)
+
+cases.control
+  cases.control1
+  cases.control2
+  cases.control3
+  cases.control4
+  cases.control5
+  cases.control6
+  cases.control7
+  cases.control8
+  cases.control9
+  cases.control10
+  cases.control11
+  cases.control12
+```
+```{r}
+seasonal.i <- filter(seasonal12, GROUP_NB == 1) 
+events.intervention <- filter(seasonal12, event == 1, GROUP_NB == 1)
+events1.i <- nrow(filter(events.intervention, end > 0 & end <= 1))
+events2.i <- nrow(filter(events.intervention, end > 1 & end <= 2))
+events3.i <- nrow(filter(events.intervention, end > 2 & end <= 3))
+events4.i <- nrow(filter(events.intervention, end > 3 & end <= 4))
+events5.i <- nrow(filter(events.intervention, end > 4 & end <= 5))
+events6.i <- nrow(filter(events.intervention, end > 5 & end <= 6))
+events7.i <- nrow(filter(events.intervention, end > 6 & end <= 7))
+events8.i <- nrow(filter(events.intervention, end > 7 & end <= 8))
+events9.i <- nrow(filter(events.intervention, end > 8 & end <= 9))
+events10.i <- nrow(filter(events.intervention, end > 9 & end <= 10))
+events11.i <- nrow(filter(events.intervention, end > 10 & end <= 11))
+events12.i <- nrow(filter(events.intervention, end > 11 & end <= 12))
+cases.intervention1 <- events1.i/sum(seasonal.i$risktime1)*1000
+cases.intervention2 <- events2.i/sum(seasonal.i$risktime2)*1000
+cases.intervention3 <- events3.i/sum(seasonal.i$risktime3)*1000
+cases.intervention4 <- events4.i/sum(seasonal.i$risktime4)*1000
+cases.intervention5 <- events5.i/sum(seasonal.i$risktime5)*1000
+cases.intervention6 <- events6.i/sum(seasonal.i$risktime6)*1000
+cases.intervention7 <- events7.i/sum(seasonal.i$risktime7)*1000
+cases.intervention8 <- events8.i/sum(seasonal.i$risktime8)*1000
+cases.intervention9 <- events9.i/sum(seasonal.i$risktime9)*1000
+cases.intervention10 <- events10.i/sum(seasonal.i$risktime10)*1000
+cases.intervention11 <- events11.i/sum(seasonal.i$risktime11)*1000
+cases.intervention12 <- events12.i/sum(seasonal.i$risktime12)*1000
+cases.intervention = sum(
+  cases.intervention1,
+  cases.intervention2,
+  cases.intervention3,
+  cases.intervention4,
+  cases.intervention5,
+  cases.intervention6,
+  cases.intervention7,
+  cases.intervention8,
+  cases.intervention9,
+  cases.intervention10,
+  cases.intervention11,
+  cases.intervention12
+)
+
+cases.intervention
+  cases.intervention1
+  cases.intervention2
+  cases.intervention3
+  cases.intervention4
+  cases.intervention5
+  cases.intervention6
+  cases.intervention7
+  cases.intervention8
+  cases.intervention9
+  cases.intervention10
+  cases.intervention11
+  cases.intervention12
+```
+
+```{r}
+cases.control - cases.intervention
+```
+
+
+
+
+
+
+cases averer by AUC
+```{r}
+auc.fun <- function(t) 1-exp(beta0+beta1*log(t))
+integrate(auc.fun, 0, 3)
+integrate(auc.fun, 3, 6)
+integrate(auc.fun, 6, 9)
+integrate(auc.fun, 9, 12)
+ve1to3 = 2.331683/3
+ve3to6 = 1.744436/3
+ve6to9 = 1.352876/3
+ve9to12 = 1.032738/3
+
+ve1=0.8749237
+ve2=0.76502
+ve3=0.6917391
+ve4=0.631825
+ve5=0.5797121
+ve6=0.5328989
+ve7=0.4899971
+ve8=0.4501393
+ve9=0.4127394
+ve10=0.3773796
+ve11=0.3437491
+ve12=0.3116091
+```
+
+
+```{r}
+seasonal.c <- filter(seasonal.cases, GROUP_NB == 0) #773
+events.auc <- filter(seasonal.cases, event == 1, GROUP_NB == 0) #595
+events1.c <- nrow(filter(events.auc, end > 0 & end <= 3))
+events2.c <- nrow(filter(events.auc, end > 3 & end <= 6))
+events3.c <- nrow(filter(events.auc, end > 6 & end <= 9))
+events4.c <- nrow(filter(events.auc, end > 9 & end <= 12))
+cases.control1 <- events1.c/sum(seasonal.c$risktime1)*3000*ve1to3
+cases.control2 <- events2.c/sum(seasonal.c$risktime2)*3000*ve3to6
+cases.control3 <- events3.c/sum(seasonal.c$risktime3)*3000*ve6to9
+cases.control4 <- events4.c/sum(seasonal.c$risktime4)*3000*ve9to12
+cases.auc = sum(
+  cases.control1,
+  cases.control2,
+  cases.control3,
+  cases.control4
+)
+
+cases.auc
+```
+
+```{r}
+interval = seq(0, 12, by = 1)
+temp_list <- list()
+for(j in c(1:(length(interval)-1))) {
+inc.check <- seasonal
+ temp_list[[j]] = risktime(seasonal$start, seasonal$end, interval[j], interval[j+1])
+}
+inc.check <- data.frame(temp_list)
+names(inc.check) = paste0("risktime", 1:(length(interval)-1))
+seasonal.auc <- cbind(seasonal, inc.check)
+
+seasonal.c <- filter(seasonal.auc, GROUP_NB == 0) #773
+
+
+t=-9
+events.control <- filter(seasonal.auc, event == 1, GROUP_NB == 0)
+events1.c <- nrow(filter(events.control, end > 9+t& end <= 10+t))
+events2.c <- nrow(filter(events.control, end > 10+t & end <= 11+t))
+events3.c <- nrow(filter(events.control, end > 11+t & end <= 12+t))
+events4.c <- nrow(filter(events.control, end > 12+t & end <= 13+t))
+events5.c <- nrow(filter(events.control, end > 13+t & end <= 14+t))
+events6.c <- nrow(filter(events.control, end > 14+t & end <= 15+t))
+events7.c <- nrow(filter(events.control, end > 15+t& end <= 16+t))
+events8.c <- nrow(filter(events.control, end > 16+t & end <= 17+t))
+events9.c <- nrow(filter(events.control, end > 17+t & end <= 18+t))
+events10.c <- nrow(filter(events.control, end > 18+t & end <= 19+t))
+events11.c <- nrow(filter(events.control, end > 19+t & end <= 20+t))
+events12.c <- nrow(filter(events.control, end > 20+t & end <= 21+t))
+
+cases.control1 <- events1.c/sum(seasonal.c$risktime1)*1000
+cases.control2 <- events2.c/sum(seasonal.c$risktime2)*1000
+cases.control3 <- events3.c/sum(seasonal.c$risktime3)*1000
+cases.control4 <- events4.c/sum(seasonal.c$risktime4)*1000
+cases.control5 <- events5.c/sum(seasonal.c$risktime5)*1000
+cases.control6 <- events6.c/sum(seasonal.c$risktime6)*1000
+cases.control7 <- events7.c/sum(seasonal.c$risktime7)*1000
+cases.control8 <- events8.c/sum(seasonal.c$risktime8)*1000
+cases.control9 <- events9.c/sum(seasonal.c$risktime9)*1000
+cases.control10 <- events10.c/sum(seasonal.c$risktime10)*1000
+cases.control11 <- events11.c/sum(seasonal.c$risktime11)*1000
+cases.control12 <- events12.c/sum(seasonal.c$risktime12)*1000
+
+cases.auc <- sum(
+  cases.control1*ve1, 
+  cases.control2*ve2,
+  cases.control3*ve3,
+  cases.control4*ve4, 
+  cases.control5*ve5,
+  cases.control6*ve6,
+  cases.control7*ve7, 
+  cases.control8*ve8,
+  cases.control9*ve9,
+  cases.control10*ve10, 
+  cases.control11*ve11,
+  cases.control12*ve12)
+
+cases.auc
+
+```
+
+
+Modify the function 
+```{r}
+control.all <- left_join(x = data.BL.ITT, y = event.clinical, by = "PID")%>%
+   arrange(PID, date)%>%
+   filter(GROUP_NB ==3 & CENTER ==11)%>%
+   mutate(event = case_when(is.na(date)==T ~ 0,
+                           TRUE ~ 1),
+          event_td = difftime(as.Date(date), as.Date("1960-01-01"), units = "days"))%>%
+   group_by(PID)%>% 
+   distinct(event_td, .keep_all = T)%>% # emove duplicated event date for each subject
+   ungroup()%>%
+   mutate(
+    # *time* is either event time or follow-up time if there's no events
+         time = case_when(event != 0 ~ as.double((event_td - DOE)*12/365.25),
+                          TRUE ~ as.double((end_dof - DOE)*12/365.25 )),
+         follow_up = (as.double(end_dof) - as.double(DOE))*12/365.25)%>%
+   dplyr::select(PID, AGEC, GROUP_NB, CENTER, DOE, time, event, end_dof, follow_up)%>%
+   filter(time > 0)%>%
+   group_by(PID)%>%
+   # Assign start time and end time for multiple events
+   mutate(start = lag(time) + 14*12/365.25,
+          group = accumulate(time, ~ if (.y - .x <= 14*12/365.25+ 0.000000000001) .x else .y))%>%
+   ungroup()%>%
+   group_by(PID, group)%>%
+   slice_head(n = 1)%>%
+   ungroup()%>%
+   dplyr::select(-group)%>%
+   mutate(start = case_when(is.na(start) == T ~ 0,
+                           TRUE ~ start),
+          end = case_when(event == 0 ~ follow_up,
+                          TRUE ~ time))%>%
+  filter(end - start >0)
+```
+
+
+Plot incidence over time (using ITT data)
+
+```{r}
+control.allinc <- control.all%>%
+  mutate(DOE = as.Date(as.numeric(DOE), origin = "1960-01-01"),
+         time = as.Date(as.numeric(time*365/12), origin = DOE),
+         start = as.Date(as.numeric(start*365/12), origin = DOE),
+         end = as.Date(as.numeric(end*365/12), origin = DOE))%>%
+  # Change *start* and *end* from days after DOE to days after 2009-09-01 (i.e. calendar time)
+  mutate(start = as.double(difftime(as.Date(start), as.Date("2009-09-21"), units = "days"))*12/365.25,
+         end = as.double(difftime(as.Date(end), as.Date("2009-09-21"), units = "days"))*12/365.25
+         )%>%
+  arrange(PID, start)
+
+interval = seq(0, 49, by = 1)
+risk.time <- list()
+n.events <- list()
+for(j in c(1:(length(interval)-1))) {
+ risk.time[[j]] = risktime(control.allinc$start, control.allinc$end, interval[j], interval[j+1])
+ n.events[[j]] = nrow(filter(control.allinc, event == 1 & end > interval[j] & end <= interval[j+1]))
+}
+risk.time <- data.frame(risk.time)
+names(risk.time) = paste0("risktime", 1:(length(interval)-1))
+
+sumrisk <- list()
+for(j in c(1:(length(interval)-1))) {
+  sumrisk[[j]] = sum(risk.time[j])
+}
+n.events <- unlist(n.events)
+sumrisk <- unlist(sumrisk)
+inc.check <- data.frame(cbind(n.events, sumrisk))%>%
+  mutate(month_inc = n.events/sumrisk,
+         date = as.Date(as.numeric(seq(0, 48, by = 1)*365/12), origin = "2009-09-21"))
+
+ggplot(aes(y = month_inc, x = date), data = inc.check) + 
+  geom_line() + 
+  geom_point(size = 2)+
+  scale_x_date(date_breaks = "2 month")+ theme_classic() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Time", y = "Monthly incidence")
+
+ggsave("monthly incidence.png")
+```
+
+
+
+```{r}
+
+control.allinc <- control.all%>%
+  mutate(DOE = as.Date(as.numeric(DOE), origin = "1960-01-01"),
+         time = as.Date(as.numeric(time*365/12), origin = DOE),
+         start = as.Date(as.numeric(start*365/12), origin = DOE),
+         end = as.Date(as.numeric(end*365/12), origin = DOE))%>%
+  # Change *start* and *end* from days after DOE to days after 2009-09-01 (i.e. calendar time)
+  mutate(start = as.double(difftime(as.Date(start), as.Date("2009-09-01"), units = "days"))*12/365.25,
+         end = as.double(difftime(as.Date(end), as.Date("2009-09-01"), units = "days"))*12/365.25
+         )%>%
+  arrange(PID, start)
+
+library(lubridate)
+rep.inc0 <- control.allinc %>%
+  filter(time >= as.Date("2010-06-01") & time < as.Date("2011-06-01"))
+rep.inc1 <- rep.inc0%>%
+  mutate(time = time %m+% years(1),
+         PID = PID + 17370,
+         start = start + 12,
+         end = end + 12)%>%
+  arrange(PID, start)
+
+rep.inc2 <- rep.inc1%>%
+  mutate(time = time %m+% years(1),
+         PID = PID + 17370,
+         start = start + 12,
+         end = end + 12)%>%
+  arrange(PID, start)
+
+rep.inc3 <- rep.inc2%>%
+  mutate(time = time %m+% years(1),
+         PID = PID + 17370,
+         start = start + 12,
+         end = end + 12)%>%
+  arrange(PID, start)
+
+rep.all <- rbind(rep.inc0, rep.inc1,  rep.inc2,  rep.inc3)
+
+ggplot() + geom_histogram(aes(time), data = rep.all, bins = 48) + scale_x_date(date_breaks = "2 month")+ theme_classic() + theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Time", y = "Number of cases in control")
+#ggsave("cases over time.png")
+```
+
+
+
+
+```{r}
+auc.fun <- function(t) 1-exp(beta0+beta1*log(t))
+integrate(auc.fun, 0, 1)
+integrate(auc.fun, 1, 2)
+integrate(auc.fun, 2, 3)
+integrate(auc.fun, 3, 4)
+integrate(auc.fun, 4, 5)
+integrate(auc.fun, 5, 6)
+integrate(auc.fun, 6, 7)
+integrate(auc.fun, 7, 8)
+integrate(auc.fun, 8, 9)
+integrate(auc.fun, 9, 10)
+integrate(auc.fun, 10, 11)
+integrate(auc.fun, 11, 12)
+```
+
+```{r}
+t = seq(0, 11, by = 1)
+cases.auc <- 0
+interval = seq(0, 12, by = 1)
+temp_list <- list()
+for (i in c(1:length(t))){
+
+# Add columns of 1-month risk time after the dataframe
+for(j in c(1:(length(interval)-1))) {
+inc.check <- rep.all
+ temp_list[[j]] = risktime(rep.all$start, rep.all$end, 9+interval[j], 9+interval[j+1])
+}
+inc.check <- data.frame(temp_list)
+names(inc.check) = paste0("risktime", 1:(length(interval)-1))
+inc <- cbind(rep.all, inc.check)
+
+  
+events.control <- filter(inc, event == 1)
+events1.c <- nrow(filter(events.control, end > 9+t[i]& end <= 10+t[i]))
+events2.c <- nrow(filter(events.control, end > 10+t[i] & end <= 11+t[i]))
+events3.c <- nrow(filter(events.control, end > 11+t[i] & end <= 12+t[i]))
+events4.c <- nrow(filter(events.control, end > 12+t[i] & end <= 13+t[i]))
+events5.c <- nrow(filter(events.control, end > 13+t[i] & end <= 14+t[i]))
+events6.c <- nrow(filter(events.control, end > 14+t[i] & end <= 15+t[i]))
+events7.c <- nrow(filter(events.control, end > 15+t[i]& end <= 16+t[i]))
+events8.c <- nrow(filter(events.control, end > 16+t[i] & end <= 17+t[i]))
+events9.c <- nrow(filter(events.control, end > 17+t[i] & end <= 18+t[i]))
+events10.c <- nrow(filter(events.control, end > 18+t[i] & end <= 19+t[i]))
+events11.c <- nrow(filter(events.control, end > 19+t[i] & end <= 20+t[i]))
+events12.c <- nrow(filter(events.control, end > 20+t[i] & end <= 21+t[i]))
+
+cases.control1 <- events1.c/sum(inc$risktime1)*1000
+cases.control2 <- events2.c/sum(inc$risktime2)*1000
+cases.control3 <- events3.c/sum(inc$risktime3)*1000
+cases.control4 <- events4.c/sum(inc$risktime4)*1000
+cases.control5 <- events5.c/sum(inc$risktime5)*1000
+cases.control6 <- events6.c/sum(inc$risktime6)*1000
+cases.control7 <- events7.c/sum(inc$risktime7)*1000
+cases.control8 <- events8.c/sum(inc$risktime8)*1000
+cases.control9 <- events9.c/sum(inc$risktime9)*1000
+cases.control10 <- events10.c/sum(inc$risktime10)*1000
+cases.control11 <- events11.c/sum(inc$risktime11)*1000
+cases.control12 <- events12.c/sum(inc$risktime12)*1000
+
+
+ve1=0.8749237
+ve2=0.76502
+ve3=0.6917391
+ve4=0.631825
+ve5=0.5797121
+ve6=0.5328989
+ve7=0.4899971
+ve8=0.4501393
+ve9=0.4127394
+ve10=0.3773796
+ve11=0.3437491
+ve12=0.3116091
+
+
+cases.auc[i] <- sum(
+  cases.control1*ve1, 
+  cases.control2*ve2,
+  cases.control3*ve3,
+  cases.control4*ve4, 
+  cases.control5*ve5,
+  cases.control6*ve6,
+  cases.control7*ve7, 
+  cases.control8*ve8,
+  cases.control9*ve9,
+  cases.control10*ve10, 
+  cases.control11*ve11,
+  cases.control12*ve12)
+}
+cases.auc
+mean(cases.auc)
+(1413.527 + 1368.955 + 1511.253 + 1721.389 + 1978.595)/5
+```
+
+
+c("January", "February","March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+```{r}
+date = as.Date(as.numeric(t*365/12), origin = "2010-06-01")
+data.cases = data.frame(DOE = date, cases = cases.auc)%>%
+  mutate(month = c(6,7,8,9,10,11,12,1,2,3,4,5),
+         month.name = month.name[month])%>%
+  arrange(month)%>%
+  mutate(DOE = as.Date(seq(from = as.Date("2011-01-01"), to = as.Date("2011-12-01"), by = "month")))
+library(ggrepel)
+ggplot(data.cases, aes(x = month, y = cases)) + 
+  geom_line(linetype = "dashed") +
+  geom_point(color = "blue", size = 2) +
+ # ylim(1250, 2500)+
+  geom_label_repel(aes(label = round(cases, 0)), size = 3) +
+  scale_x_continuous(breaks = c(1:12), labels = month.name) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Month of completion of vaccination", y = "Cases averted per 1000 child-years")
+ggsave("cases averted vs DOE (PP).png")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

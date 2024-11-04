@@ -1,0 +1,560 @@
+---
+title: "Longer vs Shorter"
+author: "Ziwei Zhao"
+date: "May 6, 2024"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r echo=FALSE, warning=FALSE}
+library(tidyverse)
+library(survival)
+library(ggplot2)
+library(haven)
+library(data.table)
+```
+
+
+```{r}
+# Baseline data obtained using codes in STATA ClearGSK3_csv_BL.do file
+data.BL <- read_dta("./GSK3_BL.dta") # Specific documentation is in "Description of GSK3 data.docx"
+
+# Simplify, rename, and take information necessary for this research
+data.BL2 <- data.BL%>%
+  mutate(d1 = DATE_DOSE1, # date of dose1
+         d2 = DATE_DOSE2, 
+         d3 = DATE_DOSE3,
+         d4 = DATE_DOSE4,
+         DOE = STRTITT, # start date of follow-up period for cohort ITT (days since 1960-01-01)
+         end_dof = ENDITTSE, # end date of follow-up period for cohort ITT (days since 1960-01-01)
+         end_ef = ENDITTEE, # end date of extended follow-up period for cohort ITT (days since 1960-01-01)
+         gender = SEX)%>%
+  dplyr::select(PID, GROUP_NB, gender, AGEC, CENTER, d1:end_ef)
+
+
+#Filter per-protocol polulation
+#R3R -- 1
+#R3C -- 2
+#C3C -- 3
+pid <- read.csv("./gsk_110021_pid_v02.csv", sep = ",")
+table(pid$CENTER)
+table(pid$SITEC2)
+table(pid$CTY_NAM)
+Tanzania <- filter(pid, CTY_NAM == "Tanzania")
+table(Tanzania$CENTER)
+```
+
+
+Center:  
+2   Kenya
+3   Lambarene, Gabon
+7   Manghica, Mozambique
+8   Ghana
+9   Lilongwe, Malawi
+10  Tanzania
+11  Nanoro, Burkina Faso
+13  Kenya
+15  Kenya
+16  Tanzania
+19  Ghana
+
+
+PER PROTOCOL POPULATION
+
+```{r}
+# Include only subjects received first 3 doses, remove Manghica due to seasonal variation
+children.c <- filter(data.BL2, AGEC == 1 & GROUP_NB ==3)%>% #2974
+   filter(is.na(d3)== F & is.na(d2)== F & is.na(d1)== F)%>%
+   filter(CENTER!=7)%>% #2546
+   mutate(d1_m = as.double(difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d2_m = as.double(difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d3_m =  as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d4_m =  as.double(difftime(as.Date(d4), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d1d2 = d2_m - d1_m,
+         d2d3 = d3_m - d2_m,
+         d3d4 = d4_m - d3_m,
+         d3_td = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))) %>%
+  # remove out of interval doses
+  filter(d1d2 > 0.6 & d1d2 < 1.4 & d2d3 > 0.6 & d2d3 < 1.4 & end_dof > d3_td + 14) #2344
+
+children.i <- filter(data.BL2, AGEC == 1 & GROUP_NB !=3)%>% #5948
+   filter(is.na(d3)== F & is.na(d2)== F & is.na(d1)== F)%>%
+   filter(CENTER!=7)%>% #5027
+   mutate(d1_m = as.double(difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d2_m = as.double(difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d3_m =  as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d4_m =  as.double(difftime(as.Date(d4), as.Date("1960-01-01"), units = "days"))*12/365.25,
+         d1d2 = d2_m - d1_m,
+         d2d3 = d3_m - d2_m,
+         d3d4 = d4_m - d3_m,
+         d3_td = as.double(difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"))) %>%
+  # remove out of interval doses
+  filter(d1d2 > 0.6 & d1d2 < 1.4 & d2d3 > 0.6 & d2d3 < 1.4 & end_dof > d3_td + 14) #4593
+
+data.BL.PP <- rbind(children.c, children.i)%>%
+  arrange(PID)
+```
+
+
+
+
+Look at malaria events
+```{r}
+event.clinical <- read.csv("./gsk_110021_efficacy_v02.csv", sep = ",")%>%
+  filter(TEMP >= 37.5 & FINALDEN > 5000)%>%
+  mutate(date = strptime(DATE, format = "%d%b%Y"))%>%
+  dplyr::select(PID, date, everything())
+
+event.severe <- read.csv("./gsk_110021_sevmal_v02.csv", sep = ",")%>%
+  mutate(date = strptime(DATE, format = "%d%b%Y"))%>%
+  dplyr::select(PID, date, everything())
+  
+```
+
+
+
+```{r}
+# Write a function to truncate the data to certain length of follow-up time
+function.finaldata <- function (month) {
+  data.join <- left_join(x = data.BL.PP, y = event.clinical, by = "PID")%>%
+   arrange(PID, date)%>%
+   mutate(event = case_when(is.na(date)==T ~ 0,
+                           TRUE ~ 1),
+           d3_td = case_when(is.na(d3) == F ~ difftime(as.Date(d3), as.Date("1960-01-01"), units = "days"),
+                       TRUE ~ max(
+                         difftime(as.Date(d1), as.Date("1960-01-01"), units = "days"),
+                         difftime(as.Date(d2), as.Date("1960-01-01"), units = "days"))),
+          DOE = d3_td +14,
+          event_td = difftime(as.Date(date), as.Date("1960-01-01"), units = "days"))%>%
+   group_by(PID)%>% 
+   distinct(event_td, .keep_all = T)%>% # emove duplicated event date for each subject
+   ungroup()%>%
+   mutate(
+    # *time* is either event time or follow-up time if there's no events
+         time = case_when(event != 0 ~ (event_td - (d3_td +14))*12/365.25,
+                          TRUE ~ (end_dof - (d3_td+14))*12/365.25 ))
+  #get pid for subjects who only have one event
+  pid.one <- data.join%>%
+    group_by(PID)%>%filter(n()==1)
+data.join <- data.join%>%
+  # deal with subjects experience only 1 event before DOE
+  filter(time > 0 | PID %in% pid.one$PID)%>%
+   mutate(event = case_when(time <= 0 ~ 0, TRUE ~ event),
+          time = case_when(event != 0 ~ (event_td - (d3_td +14))*12/365.25,
+                          TRUE ~ (end_dof - (d3_td+14))*12/365.25 ))%>%
+  dplyr::select(PID, AGEC, GROUP_NB, CENTER, DOE, time, event, end_dof, d3d4)%>%
+   
+  mutate(
+    #Truncate time for subjects without events
+     time = case_when( #14*12/365.25 : 14 days in unit of month
+     (event == 0 & is.na(d3d4) == T & time >= month - 14*12/365.25) ~ (month - 14*12/365.25)-0.000000000001,
+     (event == 0 & is.na(d3d4) == T & time < month - 14*12/365.25) ~ as.double(time)-0.000000000001,
+     (event == 0 & time >= (d3d4-14*12/365.25) & d3d4 <= (18 + 14*12/365.25)) ~ (d3d4-14*12/365.25)-0.000000000001,
+     (event == 0 & time >= (d3d4-14*12/365.25) & d3d4 > (18 + 14*12/365.25)) ~ (month - 14*12/365.25)-0.000000000001,
+     (event == 0 & time < (d3d4-14*12/365.25)  & d3d4 <= (18 + 14*12/365.25)) ~ as.double(time)-0.000000000001,
+     (event == 0 & time < (d3d4-14*12/365.25)  & d3d4 > (18 + 14*12/365.25)) ~ min(month - 14*12/365.25, time)-0.000000000001,
+     TRUE ~ as.double(time)),
+     #set censoring time
+      end_dof = (as.double(end_dof) - as.double(DOE))*12/365.25,
+      follow_up = case_when(
+            (is.na(d3d4) == T & end_dof >= month - 14*12/365.25) ~ month - 14*12/365.25,
+            (is.na(d3d4) == T & end_dof < month - 14*12/365.25) ~ end_dof,
+            (end_dof >= (d3d4-14*12/365.25) & d3d4 <= (month + 14*12/365.25)) ~ d3d4-14*12/365.25,
+            (end_dof >= (d3d4-14*12/365.25) & d3d4 > (month + 14*12/365.25)) ~ month - 14*12/365.25,
+            (end_dof < (d3d4-14*12/365.25) & d3d4 <= (month + 14*12/365.25)) ~ end_dof,
+            (end_dof < (d3d4-14*12/365.25) & d3d4 > (month + 14*12/365.25)) ~ min(month - 14*12/365.25, end_dof)),
+          GROUP_NB = case_when(GROUP_NB == 3 ~ 0,
+                               TRUE ~ 1))%>%
+   group_by(PID)%>%
+   # Assign start time and end time for multiple events
+   mutate(start = lag(time))%>%
+   ungroup()%>%
+   mutate(start = case_when(is.na(start) == T ~ 0,
+                           TRUE ~ start),
+          end = case_when(start == 0 & time >= follow_up ~ follow_up -0.000000000001,
+                          TRUE ~ time),
+          event = case_when(start == 0 & time > follow_up ~ 0,
+                            TRUE ~ event))%>%
+  filter(end <= follow_up)
+
+# Add a row for non-censored subjects at 20th month (subjects with events)
+event_follow <- filter(data.join, event ==1 & abs(end_dof-time) <= 0.00001)
+events <- filter(data.join, event ==1 & end_dof > follow_up & PID %in% event_follow$PID == F)%>%
+  group_by(PID)%>%
+  summarise(AGEC = last(AGEC),
+            GROUP_NB = last(GROUP_NB),
+            CENTER = last(CENTER),
+            DOE = last(DOE),
+            event = max(event),
+            follow_up = max(follow_up),
+            end_dof = max(end_dof))%>%
+  mutate(time = follow_up,
+         event = 0)
+# Add a row for subjects censored before 20th month (subjects with events)
+events.c <- filter(data.join, event ==1 & end_dof <= follow_up & PID %in% event_follow$PID == F)%>%
+  group_by(PID)%>%
+  summarise(AGEC = last(AGEC),
+            GROUP_NB = last(GROUP_NB),
+            CENTER = last(CENTER),
+            DOE = last(DOE),
+            event = max(event),
+            follow_up = max(follow_up),
+            end_dof = max(end_dof),
+            time = last(follow_up))%>%
+  mutate(event = 0)
+
+analysis.1 <- data.join%>%
+   dplyr::select(PID, AGEC, GROUP_NB, CENTER, DOE, event, follow_up, end_dof, time)%>%
+   rbind(events, events.c)%>%
+   arrange(PID, time)
+
+# Remove events within 14 days of the subject's previous event
+data.censor <- filter(analysis.1, event == 0)
+data.events <- filter(analysis.1, event == 1)%>%
+  group_by(PID)%>%
+  mutate(group = accumulate(time, ~ if (.y - .x <= 14*12/365.25+ 0.000000000001) .x else .y))%>%
+  ungroup()%>%
+  group_by(PID, group)%>%
+  slice_head(n = 1)%>%
+  ungroup()%>%
+  dplyr::select(-group)
+
+analysis_final <- rbind(data.censor, data.events)%>%
+  arrange(PID, time)%>%
+   group_by(PID)%>%
+   # Assign start time and end time for multiple events
+   mutate(start = lag(time) + 14*12/365.25)%>%
+   ungroup()%>%
+   mutate(start = case_when(is.na(start) == T ~ 0,
+                           TRUE ~ start),
+          end = case_when(start == 0 & time >= follow_up ~ follow_up,
+                          TRUE ~ time))%>%
+  filter(end - start >0)
+  
+return(analysis_final)
+}
+
+# Follow-up 17.5 months
+analysis_longer <- function.finaldata(18)
+
+# Follow-up 14.5 months
+analysis_15 <- function.finaldata(15)
+
+# Follow-up 11.5 months
+analysis_shorter <- function.finaldata(12)
+
+```
+
+```{r}
+# population information of 17.5 month data
+nrow(analysis_longer%>%distinct(PID))
+nrow(analysis_longer%>%filter(GROUP_NB == 1)%>%distinct(PID))
+nrow(analysis_longer%>%filter(GROUP_NB == 0)%>%distinct(PID))
+```
+```{r}
+data.all <- analysis_longer%>%distinct(PID, .keep_all = T)
+nrow(filter(data.all, end_dof > 0 & end_dof <= 11.5))
+nrow(filter(data.all, end_dof > 0 & end_dof <= 11.5))/nrow(data.all)*100
+nrow(filter(data.all, end_dof > 11.5 & end_dof <= 14.5))
+nrow(filter(data.all, end_dof > 11.5 & end_dof <= 14.5))/nrow(data.all)*100
+nrow(filter(data.all, end_dof > 14.5 & end_dof <= 17.5))
+nrow(filter(data.all, end_dof > 14.5 & end_dof <= 17.5))/nrow(data.all)*100
+nrow(filter(data.all, end_dof > 17.5))
+nrow(filter(data.all, end_dof > 17.5))/nrow(data.all)*100
+nrow(data.all)
+```
+
+```{r}
+data.all.i <- analysis_longer%>%distinct(PID, .keep_all = T)%>%filter(GROUP_NB == 1)
+nrow(filter(data.all.i, end_dof > 0 & end_dof <= 11.5))
+nrow(filter(data.all.i, end_dof > 0 & end_dof <= 11.5))/nrow(data.all.i)*100
+nrow(filter(data.all.i, end_dof > 11.5 & end_dof <= 14.5))
+nrow(filter(data.all.i, end_dof > 11.5 & end_dof <= 14.5))/nrow(data.all.i)*100
+nrow(filter(data.all.i, end_dof > 14.5 & end_dof <= 17.5))
+nrow(filter(data.all.i, end_dof > 14.5 & end_dof <= 17.5))/nrow(data.all.i)*100
+nrow(filter(data.all.i, end_dof > 17.5))
+nrow(filter(data.all.i, end_dof > 17.5))/nrow(data.all.i)*100
+nrow(data.all.i)
+```
+
+```{r}
+data.all.c <- analysis_longer%>%distinct(PID, .keep_all = T)%>%filter(GROUP_NB == 0)
+nrow(filter(data.all.c, end_dof > 0 & end_dof <= 11.5))
+nrow(filter(data.all.c, end_dof > 0 & end_dof <= 11.5))/nrow(data.all.c)*100
+nrow(filter(data.all.c, end_dof > 11.5 & end_dof <= 14.5))
+nrow(filter(data.all.c, end_dof > 11.5 & end_dof <= 14.5))/nrow(data.all.c)*100
+nrow(filter(data.all.c, end_dof > 14.5 & end_dof <= 17.5))
+nrow(filter(data.all.c, end_dof > 14.5 & end_dof <= 17.5))/nrow(data.all.c)*100
+nrow(filter(data.all.c, end_dof > 17.5))
+nrow(filter(data.all.c, end_dof > 17.5))/nrow(data.all.c)*100
+nrow(data.all.c)
+```
+
+
+
+Modeling
+
+17.5 months
+
+1. PH
+```{r}
+Y = Surv(analysis_longer$start, analysis_longer$end, analysis_longer$event == 1)
+fit.ph <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER)) + cluster(PID), data = analysis_longer, control = coxph.control(timefix = F), robust = T)
+summary(fit.ph)
+
+1-exp(fit.ph[[1]][[1]])
+1-exp(fit.ph[[1]][[1]]-1.96*0.03479)
+1-exp(fit.ph[[1]][[1]]+1.96*0.03479)
+```
+
+
+2. time-varing intervention effect and AUC
+(i) g(t) = beta0 + beta1*t^0.5
+```{r}
+Y = Surv(analysis_longer$start, analysis_longer$end, analysis_longer$event == 1)
+fit.extend <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER))  + tt(GROUP_NB) + cluster(PID), data = analysis_longer,
+                   tt = function(x, t, ...) x*sqrt(t), control = coxph.control(timefix = F))
+```
+```{r}
+summary(fit.extend)
+BIC(fit.extend)
+```
+```{r}
+beta0 <- fit.extend[[1]][[1]]
+beta0
+beta1 <- fit.extend[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*sqrt(t))
+
+integrate(auc.fun, 0, 11.54)
+6.082523/11.54
+
+integrate(auc.fun, 0, 14.54)
+6.88184/14.54
+
+integrate(auc.fun, 0, 17.54)
+7.351755/17.54
+```
+
+(ii) g(t) = beta0+ beta1*log(t)
+```{r}
+Y = Surv(analysis_longer$start, analysis_longer$end, analysis_longer$event == 1)
+fit.extend <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER))  + tt(GROUP_NB) + cluster(PID), data = analysis_longer,
+                   tt = function(x, t, ...) x*log(t), control = coxph.control(timefix = F))
+#cbind(zt = x*t, zt2 = x*t^2)
+```
+```{r}
+summary(fit.extend)
+BIC(fit.extend)
+```
+```{r}
+beta0 <- fit.extend[[1]][[1]]
+beta0
+beta1 <- fit.extend[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*log(t))
+
+integrate(auc.fun, 0, 11.54)
+5.930797/11.54
+
+integrate(auc.fun, 0, 14.54)
+6.802859/14.54
+
+integrate(auc.fun, 0, 17.54)
+7.494676/17.54
+```
+
+
+
+
+14.5 months
+
+1. PH
+```{r}
+Y = Surv(analysis_15$start, analysis_15$end, analysis_15$event == 1)
+fit.ph <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER)) + cluster(PID), data = analysis_15, control = coxph.control(timefix = F), robust = T)
+summary(fit.ph)
+
+1-exp(fit.ph[[1]][[1]])
+1-exp(fit.ph[[1]][[1]]-1.96*0.03649)
+1-exp(fit.ph[[1]][[1]]+1.96*0.03649)
+```
+
+
+2. time-varing intervention effect and AUC
+(i) g(t) = beta0 + beta1*t^0.5
+```{r}
+Y = Surv(analysis_15$start, analysis_15$end, analysis_15$event == 1)
+fit.extend <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER))  + tt(GROUP_NB) + cluster(PID), data = analysis_15,
+                   tt = function(x, t, ...) x*sqrt(t), control = coxph.control(timefix = F))
+#cbind(zt = x*t, zt2 = x*t^2)
+```
+```{r}
+summary(fit.extend)
+BIC(fit.extend)
+```
+```{r}
+beta0 <- fit.extend[[1]][[1]]
+beta0
+beta1 <- fit.extend[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*sqrt(t))
+
+integrate(auc.fun, 0, 11.54)
+6.020478/11.54
+
+integrate(auc.fun, 0, 14.54)
+6.631161/14.54
+
+integrate(auc.fun, 0, 17.54)
+6.81528/17.54
+```
+
+
+(i) g(t) = beta0 + beta1*log(t)
+```{r}
+Y = Surv(analysis_15$start, analysis_15$end, analysis_15$event == 1)
+fit.extend <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER))  + tt(GROUP_NB) + cluster(PID), data = analysis_15,
+                   tt = function(x, t, ...) x*log(t), control = coxph.control(timefix = F))
+#cbind(zt = x*t, zt2 = x*t^2)
+```
+```{r}
+summary(fit.extend)
+BIC(fit.extend)
+```
+```{r}
+beta0 <- fit.extend[[1]][[1]]
+beta0
+beta1 <- fit.extend[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*log(t))
+
+integrate(auc.fun, 0, 11.54)
+5.918475/11.54
+
+integrate(auc.fun, 0, 14.54)
+6.769329/14.54
+
+integrate(auc.fun, 0, 17.54)
+7.433686/17.54
+```
+
+
+
+
+11.5 months
+
+1. PH
+```{r}
+Y = Surv(analysis_shorter$start, analysis_shorter$end, analysis_shorter$event == 1)
+fit.ph <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER)) + cluster(PID), data = analysis_shorter, control = coxph.control(timefix = F), robust = T)
+summary(fit.ph)
+
+1-exp(fit.ph[[1]][[1]])
+1-exp(fit.ph[[1]][[1]]+1.96*0.03736)
+1-exp(fit.ph[[1]][[1]]-1.96*0.03736)
+```
+
+
+2. time-varing intervention effect and AUC
+(i) g(t) = beta0 + beta1*t^0.5
+```{r}
+Y = Surv(analysis_shorter$start, analysis_shorter$end, analysis_shorter$event == 1)
+fit.extend.short <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER)) + tt(GROUP_NB) + cluster(PID), data = analysis_shorter, tt = function(x, t, ...) x*sqrt(t),
+                          control = coxph.control(timefix = F))
+#cbind(zt = x*t, zt2 = x*t^2)
+```
+```{r}
+summary(fit.extend.short)
+BIC(fit.extend.short)
+```
+```{r}
+beta0 <- fit.extend.short[[1]][[1]]
+beta0
+beta1 <- fit.extend.short[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*sqrt(t))
+
+integrate(auc.fun, 0, 11.54)
+5.901259/11.54
+
+integrate(auc.fun, 0, 14.54)
+6.309475/14.54
+
+integrate(auc.fun, 0, 17.54)
+6.188608/17.54
+```
+
+(ii) g(t) = beta0 + beta1*log(t)
+```{r}
+Y = Surv(analysis_shorter$start, analysis_shorter$end, analysis_shorter$event == 1)
+fit.extend.short <- coxph(Y ~ GROUP_NB + strata(as.factor(CENTER)) + tt(GROUP_NB) + cluster(PID), data = analysis_shorter, tt = function(x, t, ...) x*log(t),
+                          control = coxph.control(timefix = F))
+#cbind(zt = x*t, zt2 = x*t^2)
+```
+```{r}
+summary(fit.extend.short)
+BIC(fit.extend.short)
+```
+```{r}
+beta0 <- fit.extend.short[[1]][[1]]
+beta0
+beta1 <- fit.extend.short[[1]][[2]]
+beta1
+
+auc.fun <- function(t) 1-exp(beta0+beta1*log(t))
+
+integrate(auc.fun, 0, 11.54)
+5.95057/11.54
+
+integrate(auc.fun, 0, 14.54)
+6.828754/14.54
+
+integrate(auc.fun, 0, 17.54)
+7.526842/17.54
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
