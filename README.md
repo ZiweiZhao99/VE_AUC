@@ -11,3 +11,5 @@ longer_shorter.html: knitted from longer_shorter.Rmd, showing results under the 
 BurkinaFaso.Rmd: R markdown for RTSS/AS01 trial data re-analysis for one specific site at Nanoro, BurkinaFaso
 
 BurkinaFaso.html: knitted from BurkinaFaso.Rmd, showing results under the CTDT research environment provided by GSK
+
+sensitivity_analysis_logt.R, sensitivity_analysis_sqrt.R, sensitivity_analysis_t.R: R scripts for sensitivity analysis
